@@ -2,153 +2,136 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Docker Resource Monitor</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-gray-100 text-gray-800 font-sans">
+<body class="bg-gray-100 p-6 text-gray-800">
+    <div class="max-w-5xl mx-auto">
+        
+        <div id="errorBanner" class="hidden bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6 rounded shadow-sm" role="alert">
+            <p class="font-bold">Connection Error</p>
+            <p id="errorText"></p>
+        </div>
 
-    <div class="container mx-auto p-6 max-w-6xl">
-        <header class="flex justify-between items-center mb-8 pb-4 border-b border-gray-200">
-            <h1 class="text-3xl font-semibold text-gray-900">Docker Resource Monitor</h1>
-            <div class="flex items-center space-x-2">
-                <label for="pollingRate" class="text-sm font-medium text-gray-600">Polling Interval:</label>
-                <select id="pollingRate" class="bg-white border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none">
-                    <option value="1000">1s</option>
-                    <option value="3000" selected>3s</option>
-                    <option value="5000">5s</option>
-                    <option value="10000">10s</option>
-                </select>
-            </div>
-        </header>
+        <div class="flex justify-between items-center mb-6">
+            <h1 class="text-2xl font-bold">Docker Resource Monitor</h1>
+            <select id="rate" class="border p-1 rounded bg-white shadow-sm" onchange="resetInterval()">
+                <option value="1000">1s Polling</option>
+                <option value="3000" selected>3s Polling</option>
+                <option value="5000">5s Polling</option>
+            </select>
+        </div>
 
-        <!-- System Footprint Cards -->
-        <section class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-            <div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-                <h2 class="text-lg font-medium text-gray-500 mb-2">Total Containers CPU Footprint</h2>
-                <div class="flex items-baseline space-x-2">
-                    <span id="systemCpuPct" class="text-4xl font-bold text-indigo-600">0.00%</span>
-                    <span class="text-gray-400 text-sm">combined CPU load</span>
-                </div>
+        <div class="grid grid-cols-2 gap-4 mb-6 text-center">
+            <div class="bg-white p-4 rounded shadow-sm border border-gray-200">
+                <p class="text-gray-500">Containers Total CPU</p>
+                <p id="totalCpu" class="text-3xl font-bold text-indigo-600">0%</p>
             </div>
-            <div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
-                <h2 class="text-lg font-medium text-gray-500 mb-2">Containers Memory Footprint</h2>
-                <div class="flex items-baseline space-x-2">
-                    <span id="systemMemPct" class="text-4xl font-bold text-indigo-600">0.00%</span>
-                    <span class="text-gray-400 text-sm">of host total memory (<span id="totalHostMem">0</span> MB)</span>
-                </div>
+            <div class="bg-white p-4 rounded shadow-sm border border-gray-200">
+                <p class="text-gray-500">Memory Footprint (of Host)</p>
+                <p id="totalMem" class="text-3xl font-bold text-indigo-600">0%</p>
             </div>
-        </section>
+        </div>
 
-        <!-- Containers Table -->
-        <section class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
-            <table class="min-w-full divide-y divide-gray-200">
-                <thead class="bg-gray-50">
+        <div class="bg-white rounded shadow-sm border border-gray-200 overflow-hidden">
+            <table class="w-full text-left">
+                <thead class="bg-gray-50 border-b">
                     <tr>
-                        <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Container</th>
-                        <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-                        <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">CPU %</th>
-                        <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Memory</th>
-                        <th class="px-6 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+                        <th class="p-4">Container</th>
+                        <th class="p-4">Status</th>
+                        <th class="p-4">CPU %</th>
+                        <th class="p-4">Memory (MB)</th>
+                        <th class="p-4 text-right">Actions</th>
                     </tr>
                 </thead>
-                <tbody id="containerTableBody" class="bg-white divide-y divide-gray-200">
-                    <!-- Dynamic Rows Insertion -->
+                <tbody id="tableBody">
+                    <tr>
+                        <td colspan="5" class="p-4 text-center text-gray-400">Loading containers...</td>
+                    </tr>
                 </tbody>
             </table>
-        </section>
+        </div>
     </div>
 
     <script>
-        let intervalId = null;
+        let timer;
+        const errorBanner = document.getElementById('errorBanner');
+        const errorText = document.getElementById('errorText');
 
-        async function fetchMetrics() {
+        async function update() {
             try {
-                const response = await fetch('/api/metrics');
-                const data = await response.json();
+                // FIXED: Added cache-busting timestamp (?_=${Date.now()}) to bypass Brave/Edge caching filters
+                const res = await fetch(`/api/metrics?_=${Date.now()}`);
+                const data = await res.json();
                 
-                if (data.error) {
-                    console.error("API error:", data.error);
+                if (res.status !== 200 || data.error) {
+                    showError(data.error || "An unknown backend error occurred.");
                     return;
                 }
 
-                updateUI(data);
-            } catch (error) {
-                console.error("Error retrieving data:", error);
-            }
-        }
-
-        function updateUI(data) {
-            // Update summary cards
-            document.getElementById('systemCpuPct').innerText = `${data.system.containers_total_cpu_percent}%`;
-            document.getElementById('systemMemPct').innerText = `${data.system.containers_total_mem_percent}%`;
-            document.getElementById('totalHostMem').innerText = Math.round(data.system.host_total_memory_mb);
-
-            // Populate table rows
-            const tbody = document.getElementById('containerTableBody');
-            tbody.innerHTML = '';
-
-            data.containers.forEach(container => {
-                const isRunning = container.status === 'running';
-                const statusColor = isRunning ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800';
+                hideError();
                 
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td class="px-6 py-4 whitespace-nowrap">
-                        <div class="text-sm font-medium text-gray-900">${container.name}</div>
-                        <div class="text-xs text-gray-400">${container.id}</div>
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap">
-                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${statusColor}">
-                            ${container.status}
-                        </span>
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        ${isRunning ? container.cpu + '%' : '-'}
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        ${isRunning ? `${container.memory} MB / ${container.memory_limit} MB` : '-'}
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
-                        ${isRunning ? 
-                            `<button onclick="controlContainer('${container.id}', 'stop')" class="text-red-600 hover:text-red-900 font-semibold">Stop</button>
-                             <button onclick="controlContainer('${container.id}', 'restart')" class="text-blue-600 hover:text-blue-900 font-semibold">Restart</button>` 
-                            : 
-                            `<button onclick="controlContainer('${container.id}', 'start')" class="text-green-600 hover:text-green-900 font-semibold">Start</button>`
-                        }
-                    </td>
-                `;
-                tbody.appendChild(tr);
-            });
-        }
-
-        async function controlContainer(id, action) {
-            try {
-                const response = await fetch(`/api/containers/${id}/${action}`, { method: 'POST' });
-                const result = await response.json();
-                if (result.status === "success") {
-                    fetchMetrics(); // Refresh data immediately
-                } else {
-                    alert(`Error: ${result.error}`);
+                document.getElementById('totalCpu').innerText = data.system.containers_total_cpu_percent + '%';
+                document.getElementById('totalMem').innerText = data.system.containers_total_mem_percent + '%';
+                
+                const body = document.getElementById('tableBody');
+                if (data.containers.length === 0) {
+                    body.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-gray-400">No containers found.</td></tr>`;
+                    return;
                 }
-            } catch (error) {
-                console.error(`Error performing action ${action}:`, error);
+
+                body.innerHTML = data.containers.map(c => `
+                    <tr class="border-b hover:bg-gray-50">
+                        <td class="p-4 font-medium">
+                            <div>${c.name}</div>
+                            <div class="text-xs text-gray-400 font-normal">${c.id}</div>
+                        </td>
+                        <td class="p-4"><span class="px-2 py-1 rounded text-xs font-semibold ${c.status==='running'?'bg-green-100 text-green-700':'bg-red-100 text-red-700'}">${c.status}</span></td>
+                        <td class="p-4">${c.status==='running' ? c.cpu + '%' : '-'}</td>
+                        <td class="p-4">${c.status==='running' ? `${c.memory} MB / ${c.memory_limit} MB` : '-'}</td>
+                        <td class="p-4 text-right">
+                            ${c.status==='running' ? 
+                                `<button onclick="action('${c.id}','stop')" class="text-red-500 hover:underline mr-2">Stop</button>
+                                 <button onclick="action('${c.id}','restart')" class="text-blue-500 hover:underline">Restart</button>` :
+                                `<button onclick="action('${c.id}','start')" class="text-green-500 hover:underline">Start</button>`
+                            }
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (e) { 
+                showError("Cannot connect to server. Ensure container is running.");
             }
         }
 
-        function setupInterval() {
-            if (intervalId) {
-                clearInterval(intervalId);
-            }
-            const rate = document.getElementById('pollingRate').value;
-            fetchMetrics(); // Fetch initial data
-            intervalId = setInterval(fetchMetrics, parseInt(rate));
+        function showError(msg) {
+            errorText.innerText = msg;
+            errorBanner.classList.remove('hidden');
         }
 
-        document.getElementById('pollingRate').addEventListener('change', setupInterval);
+        function hideError() {
+            errorBanner.classList.add('hidden');
+        }
 
-        // Initial setup
-        setupInterval();
+        async function action(id, act) {
+            try {
+                // Prevent aggressive browser actions caching
+                const res = await fetch(`/api/containers/${id}/${act}?_=${Date.now()}`, {method:'POST'});
+                const data = await res.json();
+                if (data.error) alert(data.error);
+                update();
+            } catch (e) {
+                alert("Action failed to execute.");
+            }
+        }
+
+        function resetInterval() {
+            clearInterval(timer);
+            const rate = document.getElementById('rate').value;
+            timer = setInterval(update, parseInt(rate));
+            update();
+        }
+        
+        resetInterval();
     </script>
 </body>
 </html>
