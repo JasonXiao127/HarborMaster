@@ -22,16 +22,14 @@ HarborMaster enforces a **two-container architecture** to guarantee security iso
 
 ---
 
-## 📂 Directory Structure
+## Deployment Instructions
 
-Ensure your project workspace contains the following files before deploying:
+This project was meant to deploy strictly with docker compose. 
 
-```text
-docker-monitor/
-├── app.py
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
-├── README.md
-└── templates/
-    └── index.html
+### Quick Start (TL;DR)
+```bash
+git clone [https://github.com/YOUR_USERNAME/HarborMaster.git](https://github.com/YOUR_USERNAME/HarborMaster.git)
+cd HarborMaster
+docker compose up -d --build
+
+
