@@ -28,7 +28,7 @@ This project was meant to deploy strictly with docker compose.
 
 ### Quick Start (TL;DR)
 ```bash
-git clone [https://github.com/YOUR_USERNAME/HarborMaster.git](https://github.com/YOUR_USERNAME/HarborMaster.git)
+git clone [https://github.com/JasonXiao127/HarborMaster.git](https://github.com/JasonXiao127/HarborMaster.git)
 cd HarborMaster
 docker compose up -d --build
 
