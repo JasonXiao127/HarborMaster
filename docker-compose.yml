@@ -1,0 +1,13 @@
+services:
+  monitor:
+    build: .
+    container_name: docker_resource_monitor
+    ports:
+      - "5000:5000"
+    volumes:
+      # Grants access to the host's Docker socket
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Relies on the host network namespaces if you want psutil 
+    # to evaluate direct system-level RAM and CPU parameters with less virtualization bias
+    pid: "host"
+    restart: always

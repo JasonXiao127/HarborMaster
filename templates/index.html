@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Docker Resource Monitor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans">
+
+    <div class="container mx-auto p-6 max-w-6xl">
+        <header class="flex justify-between items-center mb-8 pb-4 border-b border-gray-200">
+            <h1 class="text-3xl font-semibold text-gray-900">Docker Resource Monitor</h1>
+            <div class="flex items-center space-x-2">
+                <label for="pollingRate" class="text-sm font-medium text-gray-600">Polling Interval:</label>
+                <select id="pollingRate" class="bg-white border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none">
+                    <option value="1000">1s</option>
+                    <option value="3000" selected>3s</option>
+                    <option value="5000">5s</option>
+                    <option value="10000">10s</option>
+                </select>
+            </div>
+        </header>
+
+        <!-- System Footprint Cards -->
+        <section class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                <h2 class="text-lg font-medium text-gray-500 mb-2">Total Containers CPU Footprint</h2>
+                <div class="flex items-baseline space-x-2">
+                    <span id="systemCpuPct" class="text-4xl font-bold text-indigo-600">0.00%</span>
+                    <span class="text-gray-400 text-sm">combined CPU load</span>
+                </div>
+            </div>
+            <div class="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+                <h2 class="text-lg font-medium text-gray-500 mb-2">Containers Memory Footprint</h2>
+                <div class="flex items-baseline space-x-2">
+                    <span id="systemMemPct" class="text-4xl font-bold text-indigo-600">0.00%</span>
+                    <span class="text-gray-400 text-sm">of host total memory (<span id="totalHostMem">0</span> MB)</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Containers Table -->
+        <section class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Container</th>
+                        <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
+                        <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">CPU %</th>
+                        <th class="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Memory</th>
+                        <th class="px-6 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="containerTableBody" class="bg-white divide-y divide-gray-200">
+                    <!-- Dynamic Rows Insertion -->
+                </tbody>
+            </table>
+        </section>
+    </div>
+
+    <script>
+        let intervalId = null;
+
+        async function fetchMetrics() {
+            try {
+                const response = await fetch('/api/metrics');
+                const data = await response.json();
+                
+                if (data.error) {
+                    console.error("API error:", data.error);
+                    return;
+                }
+
+                updateUI(data);
+            } catch (error) {
+                console.error("Error retrieving data:", error);
+            }
+        }
+
+        function updateUI(data) {
+            // Update summary cards
+            document.getElementById('systemCpuPct').innerText = `${data.system.containers_total_cpu_percent}%`;
+            document.getElementById('systemMemPct').innerText = `${data.system.containers_total_mem_percent}%`;
+            document.getElementById('totalHostMem').innerText = Math.round(data.system.host_total_memory_mb);
+
+            // Populate table rows
+            const tbody = document.getElementById('containerTableBody');
+            tbody.innerHTML = '';
+
+            data.containers.forEach(container => {
+                const isRunning = container.status === 'running';
+                const statusColor = isRunning ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800';
+                
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="text-sm font-medium text-gray-900">${container.name}</div>
+                        <div class="text-xs text-gray-400">${container.id}</div>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${statusColor}">
+                            ${container.status}
+                        </span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        ${isRunning ? container.cpu + '%' : '-'}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        ${isRunning ? `${container.memory} MB / ${container.memory_limit} MB` : '-'}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-2">
+                        ${isRunning ? 
+                            `<button onclick="controlContainer('${container.id}', 'stop')" class="text-red-600 hover:text-red-900 font-semibold">Stop</button>
+                             <button onclick="controlContainer('${container.id}', 'restart')" class="text-blue-600 hover:text-blue-900 font-semibold">Restart</button>` 
+                            : 
+                            `<button onclick="controlContainer('${container.id}', 'start')" class="text-green-600 hover:text-green-900 font-semibold">Start</button>`
+                        }
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        async function controlContainer(id, action) {
+            try {
+                const response = await fetch(`/api/containers/${id}/${action}`, { method: 'POST' });
+                const result = await response.json();
+                if (result.status === "success") {
+                    fetchMetrics(); // Refresh data immediately
+                } else {
+                    alert(`Error: ${result.error}`);
+                }
+            } catch (error) {
+                console.error(`Error performing action ${action}:`, error);
+            }
+        }
+
+        function setupInterval() {
+            if (intervalId) {
+                clearInterval(intervalId);
+            }
+            const rate = document.getElementById('pollingRate').value;
+            fetchMetrics(); // Fetch initial data
+            intervalId = setInterval(fetchMetrics, parseInt(rate));
+        }
+
+        document.getElementById('pollingRate').addEventListener('change', setupInterval);
+
+        // Initial setup
+        setupInterval();
+    </script>
+</body>
+</html>
