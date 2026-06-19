@@ -24,7 +24,7 @@ HarborMaster enforces a **two-container architecture** to guarantee security iso
 
 ## Deployment Instructions
 
-This project was meant to deploy strictly with docker compose. 
+This project was meant to deploy strictly with docker compose. Environmental Variables are an option to modify the default ports
 
 ### Quick Start (TL;DR)
 ```bash
