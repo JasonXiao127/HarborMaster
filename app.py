@@ -1,26 +1,22 @@
 from flask import Flask, jsonify, render_template
 import docker
 import psutil
-import os
+from concurrent.futures import ThreadPoolExecutor
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# Cache for CPU delta calculations
 CPU_CACHE = {}
 
 def get_docker_client():
     try:
-        # docker.from_env() automatically reads the DOCKER_HOST env variable 
-        # (tcp://socket-proxy:2375) we specified in docker-compose.yml
         client = docker.from_env()
         client.ping()
         return client
     except Exception as e:
-        logger.error(f"Failed to connect to the Docker TCP Proxy: {e}")
+        logger.error(f"Failed to connect to Docker socket: {e}")
         return None
 
 def calculate_cpu_percent(container_id, stats):
@@ -50,21 +46,42 @@ def calculate_cpu_percent(container_id, stats):
         pass
     return 0.0
 
-def get_container_stats(container):
+def get_single_container_data(container):
+    """Processes a single container. Safe to run in parallel threads."""
+    data = {
+        "id": container.short_id,
+        "name": container.name,
+        "status": container.status,
+        "cpu": 0.0,
+        "memory": 0.0,
+        "memory_limit": 0.0
+    }
+    
     if container.status != "running":
-        return {"cpu_percent": 0.0, "memory_usage_mb": 0.0, "memory_limit_mb": 0.0}
+        return data
+
     try:
         stats = container.stats(stream=False)
-        mem_use = stats.get("memory_stats", {}).get("usage", 0)
-        mem_limit = stats.get("memory_stats", {}).get("limit", 1)
         
-        return {
-            "cpu_percent": calculate_cpu_percent(container.id, stats),
-            "memory_usage_mb": round(mem_use / (1024 * 1024), 2),
-            "memory_limit_mb": round(mem_limit / (1024 * 1024), 2)
-        }
-    except Exception:
-        return {"cpu_percent": 0.0, "memory_usage_mb": 0.0, "memory_limit_mb": 0.0}
+        # MEMORY CALCULATION CORRECTION (Matching 'docker stats' and 'btop')
+        mem_stats = stats.get("memory_stats", {})
+        usage = mem_stats.get("usage", 0)
+        
+        # Subtract filesystem cache (inactive_file on cgroups v2, cache on cgroups v1)
+        details = mem_stats.get("stats", {})
+        cache = details.get("inactive_file", details.get("cache", 0))
+        
+        # Real Active RSS Memory
+        real_mem = max(0, usage - cache)
+        mem_limit = mem_stats.get("limit", 1)
+        
+        data["cpu"] = calculate_cpu_percent(container.id, stats)
+        data["memory"] = round(real_mem / (1024 * 1024), 2)
+        data["memory_limit"] = round(mem_limit / (1024 * 1024), 2)
+    except Exception as e:
+        logger.debug(f"Error fetching stats for {container.name}: {e}")
+        
+    return data
 
 @app.route('/')
 def index():
@@ -74,35 +91,22 @@ def index():
 def get_metrics():
     client = get_docker_client()
     if not client:
-        return jsonify({
-            "error": "Cannot connect to the Docker socket proxy. Check proxy container logs."
-        }), 500
-
-    containers_data = []
-    total_containers_cpu = 0.0
-    total_containers_mem_bytes = 0
+        return jsonify({"error": "Cannot connect to the Docker daemon proxy."}), 500
 
     try:
-        for container in client.containers.list(all=True):
-            # Ignore the socket-proxy itself to keep the UI clean
-            if container.name == "docker_socket_proxy":
-                continue
-                
-            stats = get_container_stats(container)
-            total_containers_cpu += stats["cpu_percent"]
-            total_containers_mem_bytes += stats["memory_usage_mb"] * 1024 * 1024
+        containers = client.containers.list(all=True)
+        # Exclude the secure proxy from your lists
+        filtered_containers = [c for c in containers if c.name != "docker_socket_proxy"]
 
-            containers_data.append({
-                "id": container.short_id,
-                "name": container.name,
-                "status": container.status,
-                "cpu": stats["cpu_percent"],
-                "memory": stats["memory_usage_mb"],
-                "memory_limit": stats["memory_limit_mb"]
-            })
-        
+        # Solve the latency issue: fetch stats in parallel using threads
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            containers_data = list(executor.map(get_single_container_data, filtered_containers))
+
+        total_containers_cpu = sum(c["cpu"] for c in containers_data)
+        total_containers_mem_bytes = sum(c["memory"] for c in containers_data) * 1024 * 1024
+
         sys_mem = psutil.virtual_memory().total
-        container_mem_pct = round(((total_containers_mem_bytes) / sys_mem) * 100, 2) if sys_mem > 0 else 0
+        container_mem_pct = round((total_containers_mem_bytes / sys_mem) * 100, 2) if sys_mem > 0 else 0
         
         return jsonify({
             "containers": containers_data,
@@ -113,6 +117,7 @@ def get_metrics():
             }
         })
     except Exception as e:
+        logger.error(f"Error in API: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/containers/<container_id>/<action>', methods=['POST'])
