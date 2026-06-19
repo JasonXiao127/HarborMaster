@@ -3,7 +3,7 @@ services:
     build: .
     container_name: docker_resource_monitor
     ports:
-      - "5000:5000"
+      - "{APP_PORT:-5151}:5000"
     volumes:
       # Grants access to the host's Docker socket
       - /var/run/docker.sock:/var/run/docker.sock
