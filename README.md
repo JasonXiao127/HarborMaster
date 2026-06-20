@@ -2,8 +2,7 @@
 
 HarborMaster is a lightweight, containerized web application designed to monitor your Docker containers and system resource usage in real-time. Built with a focus on simplicity, ease of deployment, and security.
 
-<img width="2547" height="1303" alt="image" src="https://github.com/user-attachments/assets/1c1d2dcf-57ef-4fb7-94b4-6992271d2408" />
-
+<img width="1062" height="485" alt="image" src="https://github.com/user-attachments/assets/2d79126e-8da7-40ce-8694-1773afdc6890" />
 
 ---
 ##  Features
