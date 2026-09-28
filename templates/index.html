@@ -2,24 +2,26 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Docker Resource Monitor</title>
+    <title>HarborMaster</title>
     <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-gray-100 p-6 text-gray-800">
     <div class="max-w-5xl mx-auto">
-        
         <div id="errorBanner" class="hidden bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6 rounded shadow-sm" role="alert">
             <p class="font-bold">Connection Error</p>
             <p id="errorText"></p>
         </div>
 
         <div class="flex justify-between items-center mb-6">
-            <h1 class="text-2xl font-bold">Docker Resource Monitor</h1>
-            <select id="rate" class="border p-1 rounded bg-white shadow-sm" onchange="resetInterval()">
-                <option value="1000">1s Polling</option>
-                <option value="3000" selected>3s Polling</option>
-                <option value="5000">5s Polling</option>
-            </select>
+            <h1 class="text-2xl font-bold">HarborMaster</h1>
+            <div class="flex items-center gap-2">
+                <select id="rate" class="border p-1 rounded bg-white shadow-sm">
+                    <option value="1000">1s Polling</option>
+                    <option value="3000" selected>3s Polling</option>
+                    <option value="5000">5s Polling</option>
+                </select>
+                <span id="updatedAt" class="text-xs text-gray-400"></span>
+            </div>
         </div>
 
         <div class="grid grid-cols-2 gap-4 mb-6 text-center">
@@ -54,57 +56,94 @@
     </div>
 
     <script>
-        let timer;
+        let timer = null;
+        let isFetching = false;
         const errorBanner = document.getElementById('errorBanner');
         const errorText = document.getElementById('errorText');
 
-        async function update() {
+        function escapeHtml(s) {
+            return String(s ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[ch]));
+        }
+
+        async function fetchJson(url, opts) {
+            const ctrl = new AbortController();
+            const t = setTimeout(() => ctrl.abort(), 10000);
             try {
-                // FIXED: Added cache-busting timestamp (?_=${Date.now()}) to bypass Brave/Edge caching filters
-                const res = await fetch(`/api/metrics?_=${Date.now()}`);
-                const data = await res.json();
-                
-                if (res.status !== 200 || data.error) {
-                    showError(data.error || "An unknown backend error occurred.");
+                const res = await fetch(url, { ...(opts || {}), signal: ctrl.signal });
+                const ct = res.headers.get('content-type') || '';
+                let data = {};
+                try {
+                    data = ct.includes('application/json') ? await res.json() : { error: `HTTP ${res.status}` };
+                } catch {
+                    data = { error: `Invalid server response (HTTP ${res.status})` };
+                }
+                return { res, data };
+            } finally {
+                clearTimeout(t);
+            }
+        }
+
+        async function update() {
+            if (isFetching || document.hidden) return;
+            isFetching = true;
+            try {
+                const { res, data } = await fetchJson(`/api/metrics?_=${Date.now()}`);
+
+                if (!res.ok || data.error) {
+                    showError(data.error || `HTTP ${res.status}`);
+                    return;
+                }
+                if (!data || !data.system || !Array.isArray(data.containers)) {
+                    showError('Malformed metrics response.');
                     return;
                 }
 
                 hideError();
-                
-                document.getElementById('totalCpu').innerText = data.system.containers_total_cpu_percent + '%';
-                document.getElementById('totalMem').innerText = data.system.containers_total_mem_percent + '%';
-                
+
+                document.getElementById('totalCpu').innerText = `${Number(data.system.containers_total_cpu_percent) || 0}%`;
+                document.getElementById('totalMem').innerText = `${Number(data.system.containers_total_mem_percent) || 0}%`;
+                document.getElementById('updatedAt').innerText =
+                    `Updated ${new Date().toLocaleTimeString()}`;
+
                 const body = document.getElementById('tableBody');
                 if (data.containers.length === 0) {
                     body.innerHTML = `<tr><td colspan="5" class="p-4 text-center text-gray-400">No containers found.</td></tr>`;
                     return;
                 }
 
-                body.innerHTML = data.containers.map(c => `
-                    <tr class="border-b hover:bg-gray-50">
-                        <td class="p-4 font-medium">
-                            <div>${c.name}</div>
-                            <div class="text-xs text-gray-400 font-normal">${c.id}</div>
-                        </td>
-                        <td class="p-4"><span class="px-2 py-1 rounded text-xs font-semibold ${c.status==='running'?'bg-green-100 text-green-700':'bg-red-100 text-red-700'}">${c.status}</span></td>
-                        <td class="p-4">${c.status==='running' ? c.cpu + '%' : '-'}</td>
-                        <td class="p-4">${c.status==='running' ? `${c.memory} MB / ${c.memory_limit} MB` : '-'}</td>
-                        <td class="p-4 text-right">
-                            ${c.status==='running' ? 
-                                `<button onclick="action('${c.id}','stop')" class="text-red-500 hover:underline mr-2">Stop</button>
-                                 <button onclick="action('${c.id}','restart')" class="text-blue-500 hover:underline">Restart</button>` :
-                                `<button onclick="action('${c.id}','start')" class="text-green-500 hover:underline">Start</button>`
-                            }
-                        </td>
-                    </tr>
-                `).join('');
-            } catch (e) { 
-                showError("Cannot connect to server. Ensure container is running.");
+                body.innerHTML = data.containers.map(c => {
+                    const name = escapeHtml(c.name);
+                    const id = escapeHtml(c.id);
+                    const status = escapeHtml(c.status);
+                    const badge = c.status === 'running'
+                        ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700';
+                    const cpu = c.status === 'running' ? `${Number(c.cpu) || 0}%` : '-';
+                    const mem = c.status === 'running'
+                        ? `${Number(c.memory) || 0} MB / ${Number(c.memory_limit) || 0} MB` : '-';
+                    const actions = c.status === 'running'
+                        ? `<button data-id="${id}" data-action="stop" class="text-red-500 hover:underline mr-2">Stop</button>`
+                          + `<button data-id="${id}" data-action="restart" class="text-blue-500 hover:underline">Restart</button>`
+                        : `<button data-id="${id}" data-action="start" class="text-green-500 hover:underline">Start</button>`;
+                    return `<tr class="border-b hover:bg-gray-50">`
+                        + `<td class="p-4 font-medium"><div>${name}</div>`
+                        + `<div class="text-xs text-gray-400 font-normal">${id}</div></td>`
+                        + `<td class="p-4"><span class="px-2 py-1 rounded text-xs font-semibold ${badge}">${status}</span></td>`
+                        + `<td class="p-4">${escapeHtml(cpu)}</td>`
+                        + `<td class="p-4">${escapeHtml(mem)}</td>`
+                        + `<td class="p-4 text-right">${actions}</td></tr>`;
+                }).join('');
+            } catch (e) {
+                if (e && e.name === 'AbortError') showError('Request timed out.');
+                else showError('Cannot connect to server. Ensure container is running.');
+            } finally {
+                isFetching = false;
             }
         }
 
         function showError(msg) {
-            errorText.innerText = msg;
+            errorText.innerText = String(msg);
             errorBanner.classList.remove('hidden');
         }
 
@@ -112,25 +151,37 @@
             errorBanner.classList.add('hidden');
         }
 
-        async function action(id, act) {
+        async function containerAction(id, act) {
             try {
-                // Prevent aggressive browser actions caching
-                const res = await fetch(`/api/containers/${id}/${act}?_=${Date.now()}`, {method:'POST'});
-                const data = await res.json();
-                if (data.error) alert(data.error);
+                const { res, data } = await fetchJson(
+                    `/api/containers/${encodeURIComponent(id)}/${encodeURIComponent(act)}?_=${Date.now()}`,
+                    { method: 'POST' });
+                if (!res.ok || data.error) {
+                    showError(data.error || `Action failed (HTTP ${res.status})`);
+                    return;
+                }
                 update();
-            } catch (e) {
-                alert("Action failed to execute.");
+            } catch {
+                showError('Action failed to execute.');
             }
         }
 
+        document.getElementById('tableBody').addEventListener('click', e => {
+            const btn = e.target.closest('button[data-id][data-action]');
+            if (btn) containerAction(btn.dataset.id, btn.dataset.action);
+        });
+
         function resetInterval() {
-            clearInterval(timer);
-            const rate = document.getElementById('rate').value;
-            timer = setInterval(update, parseInt(rate));
+            if (timer) clearInterval(timer);
+            const rate = parseInt(document.getElementById('rate').value, 10) || 3000;
+            timer = setInterval(update, rate);
             update();
         }
-        
+
+        document.getElementById('rate').addEventListener('change', resetInterval);
+        document.addEventListener('visibilitychange', () => { if (!document.hidden) update(); });
+        window.addEventListener('beforeunload', () => { if (timer) clearInterval(timer); });
+
         resetInterval();
     </script>
 </body>
