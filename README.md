@@ -1,42 +1,59 @@
-# ⚓ HarborMaster
+# HarborMaster
 
-HarborMaster is a lightweight, containerized web application designed to monitor your Docker containers and system resource usage in real-time. Built with a focus on simplicity, ease of deployment, and security.
+Web UI to watch Docker CPU and memory and to start, stop, and restart containers.
 
-<img width="1062" height="485" alt="image" src="https://github.com/user-attachments/assets/2d79126e-8da7-40ce-8694-1773afdc6890" />
+<img width="1062" height="485" alt="HarborMaster dashboard screenshot" src="https://github.com/user-attachments/assets/2d79126e-8da7-40ce-8694-1773afdc6890" />
 
----
-##  Features
+## Features
 
-* **Real-Time Container Metrics:** Instantly track CPU and memory usage of individual containers.
-* **System Footprint Overview:** View cumulative container resource usage represented as a percentage of overall host system capabilities.
-* **Interactivity:** Start, stop, and restart containers directly from the intuitive web interface.
-* **Configurable Polling:** Dynamically adjust the update frequency (1s, 3s, 5s) via the UI.
-* **Security-Hardened:** Utilizes a Docker Socket Proxy to restrict API access, with non-root read-only containers, no `pid:host`, and optional API token auth.
+* Per container CPU percent and memory use
+* Total CPU and host memory share
+* Start, stop, restart from the UI
+* Poll rate switch: 1s, 3s, 5s
 
----
+## Requirements
 
-##  Architecture
+* Docker and Docker Compose
+* Linux host with `/var/run/docker.sock` for full deploy. Local UI runs without it but metrics return 500.
 
-HarborMaster enforces a **two-container architecture** to guarantee security isolation and performance:
+## Quick start
 
-1. **`socket-proxy`**: A TCP proxy (`tecnativa/docker-socket-proxy`) between the host socket and the app. It allows container `list`/`stats` plus `start`/`stop`/`restart` (`CONTAINERS=1,POST=1,ALLOW_START/STOP/RESTARTS=1`) and blocks other API sections. Note: the proxy's generic `/containers` rule still permits other container POSTs, so keep it on the internal network only.
-2. **`monitor`**: The Python Flask web server. It connects to the proxy via TCP (rather than mounting the raw Unix socket) and runs as a non-root read-only user.
-
----
-
-## Deployment Instructions
-
-This project was meant to deploy strictly with docker compose. Environmental Variables are an option to modify the default ports
-
-### Quick Start (TL;DR)
 ```bash
 git clone https://github.com/JasonXiao127/HarborMaster.git
 cd HarborMaster
-cp .env.example .env  # optional; set MONITOR_AUTH_TOKEN to require API auth
+cp .env.example .env
 docker compose up -d --build
 ```
 
-Local dev (without Docker daemon, `/api/metrics` returns 500 until Docker is up):
+Open http://127.0.0.1:5000
+
+## Config
+
+| Var | Default | Notes |
+| --- | --- | --- |
+| `APP_HOST_PORT` | `127.0.0.1:5000` | Keep `IP:PORT` form. A bare `5000` listens on all interfaces. |
+| `MONITOR_AUTH_TOKEN` | empty | When set, `/api/*` needs `X-Auth-Token` header or `?token=`. Empty means open. |
+| `DOCKER_TIMEOUT` | `5` | Seconds for Docker client calls. |
+| `STATS_TIMEOUT` | `5` | Seconds for per container stats. |
+
+## How it works
+
+Two containers on an internal network:
+
+1. `socket-proxy` (`tecnativa/docker-socket-proxy:0.4.1`). Sits between the Docker socket and the app. Allows `list` and `stats` plus `start`, `stop`, `restart`. Other sections stay off.
+2. `monitor`. Flask app served by gunicorn. Talks to the proxy over TCP. Runs as non-root user `65532`, read only.
+
+Note: the proxy generic `/containers` rule still allows other container POSTs, so keep port `2375` internal only.
+
+## Security
+
+* Binds to `127.0.0.1` by default. Set `APP_HOST_PORT` to expose it, and set a token first.
+* `monitor` is non-root, read only, no `pid:host`, with `cap_drop: ALL`.
+* `socket-proxy` needs root to read the socket. It uses `cap_drop: ALL`, `no-new-privileges`, and a read only fs to limit it.
+* Never publish the proxy port.
+
+## Local dev
+
 ```bash
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -44,19 +61,9 @@ pip install -r requirements.txt
 python app.py
 ```
 
-Env vars: `APP_HOST_PORT` (default `127.0.0.1:5000`), `MONITOR_AUTH_TOKEN`
-(empty = open), `DOCKER_TIMEOUT`, `STATS_TIMEOUT`.
+## Problems
 
-Security notes: `socket-proxy` uses `CONTAINERS=1,POST=1` plus
-`ALLOW_START/STOP/RESTARTS=1`, but the proxy's generic `/containers`
-rule still permits other container POSTs — treat it as defense-in-depth,
-keep the port on localhost / behind auth, and never expose `2375`.
-`monitor` runs as non-root (`65532`), read-only, no `pid:host`. `socket-proxy`
-needs root to read `/var/run/docker.sock`, so it stays root but with
-`cap_drop: ALL`, `no-new-privileges`, read-only fs.
-
-`APP_HOST_PORT` must stay in `IP:PORT` form (e.g. `127.0.0.1:5000`); a bare
-`5000` publishes on all interfaces.
-
-
-
+* `/api/metrics` 500 `Cannot connect to the Docker daemon proxy`: Docker is off or the proxy is not up. Start Docker Desktop and run `docker compose up -d`.
+* Port in use: change `APP_HOST_PORT` in `.env`, for example `127.0.0.1:5001`.
+* 401 on `/api/*`: you set a token. Send it as `X-Auth-Token` or `?token=`.
+* Windows without Docker socket: use the local dev steps above for UI work only.
