@@ -21,12 +21,12 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY app.py requirements.txt ./
 COPY templates/ ./templates/
 
-RUN useradd -r -u 65532 appuser && chown -R appuser /app
+RUN groupadd -r -g 65532 appuser && useradd -r -u 65532 -g 65532 appuser && chown -R appuser /app
 USER appuser
 
 EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/')" || exit 1
+    CMD python -c "import os,urllib.request; urllib.request.urlopen('http://localhost:'+(os.environ.get('APP_PORT','5000'))+'/')" || exit 1
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--timeout", "30", "app:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${APP_PORT:-5000} --workers 2 --threads 4 --timeout 30 app:app"]

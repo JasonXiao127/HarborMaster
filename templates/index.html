@@ -58,8 +58,17 @@
     <script>
         let timer = null;
         let isFetching = false;
+        let pendingUpdate = false;
         const errorBanner = document.getElementById('errorBanner');
         const errorText = document.getElementById('errorText');
+        const updateAtEl = document.getElementById('updatedAt');
+        const API_TOKEN =
+            new URLSearchParams(location.search).get('token')
+            || localStorage.getItem('hm_token') || '';
+        if (new URLSearchParams(location.search).get('token')) {
+            localStorage.setItem('hm_token',
+                new URLSearchParams(location.search).get('token'));
+        }
 
         function escapeHtml(s) {
             return String(s ?? '').replace(/[&<>"']/g, ch => ({
@@ -71,7 +80,9 @@
             const ctrl = new AbortController();
             const t = setTimeout(() => ctrl.abort(), 10000);
             try {
-                const res = await fetch(url, { ...(opts || {}), signal: ctrl.signal });
+                const headers = { ...(opts && opts.headers ? opts.headers : {}) };
+                if (API_TOKEN) headers['X-Auth-Token'] = API_TOKEN;
+                const res = await fetch(url, { ...(opts || {}), headers, signal: ctrl.signal });
                 const ct = res.headers.get('content-type') || '';
                 let data = {};
                 try {
@@ -85,8 +96,12 @@
             }
         }
 
-        async function update() {
-            if (isFetching || document.hidden) return;
+        async function update(force = false) {
+            if (isFetching) {
+                if (force) pendingUpdate = true;
+                return;
+            }
+            if (document.hidden && !force) return;
             isFetching = true;
             try {
                 const { res, data } = await fetchJson(`/api/metrics?_=${Date.now()}`);
@@ -139,12 +154,20 @@
                 else showError('Cannot connect to server. Ensure container is running.');
             } finally {
                 isFetching = false;
+                if (pendingUpdate) {
+                    pendingUpdate = false;
+                    update();
+                }
             }
         }
 
         function showError(msg) {
             errorText.innerText = String(msg);
             errorBanner.classList.remove('hidden');
+            if (updateAtEl) {
+                updateAtEl.innerText =
+                    `Update failed ${new Date().toLocaleTimeString()}`;
+            }
         }
 
         function hideError() {
@@ -160,7 +183,7 @@
                     showError(data.error || `Action failed (HTTP ${res.status})`);
                     return;
                 }
-                update();
+                update(true);
             } catch {
                 showError('Action failed to execute.');
             }

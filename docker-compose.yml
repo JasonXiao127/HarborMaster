@@ -44,6 +44,10 @@ services:
         limits:
           cpus: "0.50"
           memory: 256M
+    # Plain `docker compose up` ignores deploy.limits (Swarm-only);
+    # these enforce the same caps outside Swarm.
+    mem_limit: 256m
+    cpus: 0.50
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:2375/_ping || exit 1"]
       interval: 30s
@@ -64,12 +68,13 @@ services:
     user: "65532:65532"
     ports:
       # Must stay IP:PORT (e.g. 127.0.0.1:5000). A bare "5000" publishes on all interfaces.
-      - "${APP_HOST_PORT:-127.0.0.1:5000}:5000"
+      - "${APP_HOST_PORT:-127.0.0.1:5000}:${APP_PORT:-5000}"
     environment:
       - DOCKER_HOST=tcp://socket-proxy:2375
-      - APP_PORT=5000
+      - APP_PORT=${APP_PORT:-5000}
       - DOCKER_TIMEOUT=${DOCKER_TIMEOUT:-5}
       - STATS_TIMEOUT=${STATS_TIMEOUT:-5}
+      - ACTION_TIMEOUT=${ACTION_TIMEOUT:-10}
       - MONITOR_AUTH_TOKEN=${MONITOR_AUTH_TOKEN:-}
     depends_on:
       socket-proxy:
@@ -88,8 +93,12 @@ services:
         limits:
           cpus: "1.0"
           memory: 512M
+    # Plain `docker compose up` ignores deploy.limits (Swarm-only);
+    # these enforce the same caps outside Swarm.
+    mem_limit: 512m
+    cpus: 1.0
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/')\" || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request; urllib.request.urlopen('http://localhost:'+(os.environ.get('APP_PORT','5000'))+'/')\" || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

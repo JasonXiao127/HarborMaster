@@ -2,7 +2,8 @@ from flask import Flask, jsonify, render_template, request
 import docker
 from docker.errors import NotFound, APIError
 import psutil
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+import hmac
 import logging
 import os
 import re
@@ -17,18 +18,34 @@ app = Flask(__name__)
 HOST = os.getenv("HOST", "0.0.0.0")
 
 
-def _safe_int(value, default):
+def _safe_int(value, default, min_value=None, max_value=None):
     try:
-        return int(value)
+        parsed = int(value)
     except (TypeError, ValueError):
         logger.warning(f"Invalid numeric env value {value!r}, using {default}")
         return default
+    if min_value is not None and parsed < min_value:
+        logger.warning(f"Env value {parsed} below minimum {min_value}, using {default}")
+        return default
+    if max_value is not None and parsed > max_value:
+        logger.warning(f"Env value {parsed} above maximum {max_value}, using {default}")
+        return default
+    return parsed
 
 
-PORT = _safe_int(os.getenv("APP_PORT", os.getenv("PORT", "5000")), 5000)
+def _to_int(value, default=0):
+    """Coerce Docker API numbers (int, float, or numeric string) to int."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+PORT = _safe_int(os.getenv("APP_PORT", os.getenv("PORT", "5000")), 5000, 1, 65535)
 AUTH_TOKEN = os.getenv("MONITOR_AUTH_TOKEN", "")
-DOCKER_TIMEOUT = _safe_int(os.getenv("DOCKER_TIMEOUT", "5"), 5)
-STATS_TIMEOUT = _safe_int(os.getenv("STATS_TIMEOUT", "5"), 5)
+DOCKER_TIMEOUT = _safe_int(os.getenv("DOCKER_TIMEOUT", "5"), 5, 1, 120)
+STATS_TIMEOUT = _safe_int(os.getenv("STATS_TIMEOUT", "5"), 5, 1, 120)
+ACTION_TIMEOUT = _safe_int(os.getenv("ACTION_TIMEOUT", "10"), 10, 1, 120)
 
 CPU_CACHE = {}
 CACHE_LOCK = threading.Lock()
@@ -51,13 +68,14 @@ def is_authorized(req):
         return True
     supplied = (
         req.headers.get("X-Auth-Token")
-        or req.args.get("token")
         or None
     )
     authz = req.headers.get("Authorization", "")
     if not supplied and authz.startswith("Bearer "):
         supplied = authz[len("Bearer "):].strip() or None
-    return supplied == AUTH_TOKEN
+    if not supplied or not AUTH_TOKEN:
+        return False
+    return hmac.compare_digest(supplied, AUTH_TOKEN)
 
 
 @app.before_request
@@ -74,9 +92,9 @@ def security_headers(resp):
     resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     resp.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' https://cdn.tailwindcss.com; "
+        "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; "
         "style-src 'self' 'unsafe-inline'; "
-        "connect-src 'self'; object-src 'none'"
+        "connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
     )
     return resp
 
@@ -89,6 +107,21 @@ def get_docker_client():
     except Exception as e:
         logger.error(f"Failed to connect to Docker socket: {e}")
         return None
+
+
+def _container_name(container):
+    return getattr(container, "name", "") or ""
+
+
+def _normalized_name(container):
+    return _container_name(container).lstrip("/").strip()
+
+
+def _close_client(client):
+    try:
+        client.close()
+    except Exception:
+        pass
 
 
 def _prune_cache(valid_ids):
@@ -162,20 +195,12 @@ def get_single_container_data(container):
             return data
 
         mem_stats = stats.get("memory_stats", {}) or {}
-        usage = mem_stats.get("usage") or 0
+        usage = _to_int(mem_stats.get("usage"), 0)
         details = mem_stats.get("stats", {}) or {}
-        cache = details.get("inactive_file", details.get("cache", 0)) or 0
-        try:
-            usage, cache = int(usage), int(cache)
-        except (TypeError, ValueError):
-            usage, cache = 0, 0
+        cache = _to_int(details.get("inactive_file", details.get("cache", 0)), 0)
 
         real_mem = max(0, usage - cache)
-        mem_limit = mem_stats.get("limit") or 0
-        try:
-            mem_limit = int(mem_limit)
-        except (TypeError, ValueError):
-            mem_limit = 0
+        mem_limit = _to_int(mem_stats.get("limit"), 0)
 
         data["cpu"] = calculate_cpu_percent(full_id, stats)
         data["_mem_bytes"] = real_mem
@@ -203,11 +228,42 @@ def get_metrics():
     try:
         containers = client.containers.list(all=True)
         filtered = [c for c in containers
-                    if getattr(c, "name", "") not in PROTECTED_NAMES]
+                    if _normalized_name(c) not in PROTECTED_NAMES]
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            containers_data = list(executor.map(
-                get_single_container_data, filtered, timeout=STATS_TIMEOUT * 2))
+        per_call_timeout = STATS_TIMEOUT * 2
+        containers_data = []
+        executor = ThreadPoolExecutor(max_workers=10)
+        try:
+            future_to_container = {
+                executor.submit(get_single_container_data, c): c for c in filtered
+            }
+            for future, container in future_to_container.items():
+                try:
+                    containers_data.append(future.result(timeout=per_call_timeout))
+                except FuturesTimeoutError:
+                    logger.warning(
+                        f"Stats timed out for {_container_name(container)}")
+                    containers_data.append({
+                        "id": getattr(container, "short_id", "?"),
+                        "name": _container_name(container) or "?",
+                        "status": getattr(container, "status", "?") or "?",
+                        "cpu": 0.0, "memory": 0.0, "memory_limit": 0.0,
+                    })
+                except Exception as e:
+                    logger.warning(f"Stats worker failed: {e}", exc_info=True)
+                    containers_data.append({
+                        "id": getattr(container, "short_id", "?"),
+                        "name": _container_name(container) or "?",
+                        "status": getattr(container, "status", "?") or "?",
+                        "cpu": 0.0, "memory": 0.0, "memory_limit": 0.0,
+                    })
+        finally:
+            # Don't wait for hung stats threads; timed-out futures
+            # already got zero fallbacks above.
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=False)
 
         _prune_cache({getattr(c, "id", getattr(c, "short_id", "")) for c in filtered})
 
@@ -225,9 +281,11 @@ def get_metrics():
                 "host_total_memory_mb": round(sys_mem / (1024 * 1024), 2)
             }
         })
-    except Exception as e:
+    except Exception:
         logger.error("Error in /api/metrics", exc_info=True)
         return jsonify({"error": "Internal server error."}), 500
+    finally:
+        _close_client(client)
 
 
 @app.route('/api/containers/<container_id>/<action>', methods=['POST'])
@@ -242,15 +300,20 @@ def container_action(container_id, action):
         return jsonify({"error": "No Docker connection"}), 500
     try:
         container = client.containers.get(container_id)
-        if getattr(container, "name", "") in PROTECTED_NAMES:
+        if _normalized_name(container) in PROTECTED_NAMES:
             logger.warning(f"Blocked {action} on protected container {container_id}")
             return jsonify({"error": "Operation not allowed on infrastructure containers."}), 403
-        if action == "start":
-            container.start()
-        elif action == "stop":
-            container.stop(timeout=10)
-        elif action == "restart":
-            container.restart(timeout=10)
+        try:
+            if action == "start":
+                container.start()
+            elif action == "stop":
+                container.stop(timeout=ACTION_TIMEOUT)
+            elif action == "restart":
+                container.restart(timeout=ACTION_TIMEOUT)
+        except APIError as e:
+            if getattr(e, "status_code", None) == 304:
+                return jsonify({"error": "Container already in that state."}), 409
+            raise
         logger.info(f"Container {action}: {container_id}")
         return jsonify({"status": "success"})
     except NotFound:
@@ -258,6 +321,8 @@ def container_action(container_id, action):
     except Exception:
         logger.error(f"Container {action} failed for {container_id}", exc_info=True)
         return jsonify({"error": "Action failed."}), 500
+    finally:
+        _close_client(client)
 
 
 if __name__ == '__main__':

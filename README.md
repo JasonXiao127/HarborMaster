@@ -32,9 +32,11 @@ Open http://127.0.0.1:5000
 | Var | Default | Notes |
 | --- | --- | --- |
 | `APP_HOST_PORT` | `127.0.0.1:5000` | Keep `IP:PORT` form. A bare `5000` listens on all interfaces. |
-| `MONITOR_AUTH_TOKEN` | empty | When set, `/api/*` needs `X-Auth-Token` header or `?token=`. Empty means open. |
+| `APP_PORT` | `5000` | Container port. Gunicorn and healthchecks follow it. |
+| `MONITOR_AUTH_TOKEN` | empty | When set, `/api/*` needs `X-Auth-Token` header or `Authorization: Bearer`. Empty means open. The UI forwards `?token=` from the page URL as a header. |
 | `DOCKER_TIMEOUT` | `5` | Seconds for Docker client calls. |
 | `STATS_TIMEOUT` | `5` | Seconds for per container stats. |
+| `ACTION_TIMEOUT` | `10` | Seconds for start, stop, restart calls. |
 
 ## How it works
 
@@ -56,7 +58,10 @@ Note: the proxy generic `/containers` rule still allows other container POSTs, s
 
 ```bash
 python -m venv .venv
+# Windows PowerShell:
 .\.venv\Scripts\Activate.ps1
+# Linux/macOS:
+# source .venv/bin/activate
 pip install -r requirements.txt
 python app.py
 ```
@@ -65,5 +70,6 @@ python app.py
 
 * `/api/metrics` 500 `Cannot connect to the Docker daemon proxy`: Docker is off or the proxy is not up. Start Docker Desktop and run `docker compose up -d`.
 * Port in use: change `APP_HOST_PORT` in `.env`, for example `127.0.0.1:5001`.
-* 401 on `/api/*`: you set a token. Send it as `X-Auth-Token` or `?token=`.
+* 401 on `/api/*`: you set a token. Send it as `X-Auth-Token` or `Authorization: Bearer`. In a browser you can also open `http://127.0.0.1:5000/?token=YOURTOKEN` once and the UI remembers it.
+* 409 `Container already in that state`: the container is already started or stopped. Refresh the list.
 * Windows without Docker socket: use the local dev steps above for UI work only.
